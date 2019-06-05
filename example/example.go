@@ -2,7 +2,7 @@ package main
 
 import (
 	"fmt"
-	"go-zk-svc/client"
+	"github.com/difficultwork/go-zk-svc/client"
 	"sync"
 	"time"
 )
