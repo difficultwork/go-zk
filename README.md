@@ -1,2 +1,2 @@
 # go-zk-svc
-service client based on zeekeeper for go
+service client based on zookeeper for go
