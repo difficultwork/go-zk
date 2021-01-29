@@ -1,4 +1,4 @@
-module go-zk
+module github.com/difficultwork/go-zk
 
 go 1.13
 
