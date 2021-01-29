@@ -1,4 +1,4 @@
-module go-zk-svc
+module go-zk
 
 go 1.13
 
