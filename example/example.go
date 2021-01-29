@@ -12,37 +12,28 @@ type AWatcher struct {
 	wg   *sync.WaitGroup
 }
 
-func (a *AWatcher) ProcServiceAddrsChange(svcName string, addrs []string) {
-	fmt.Printf("%s watched %s address changed, new addresses as below:\n", a.name, svcName)
-	for _, v := range addrs {
-		fmt.Println(v)
-	}
-	if len(addrs) > 0 {
-		a.wg.Done()
-	}
+type processor struct{}
+
+func (p *processor) ProcChildrenChange(nodeName string, subNodeNames []string) {
+	fmt.Printf("name: %s, children: %v\n", nodeName, subNodeNames)
 }
 
 func main() {
 	var wg sync.WaitGroup
-	// zookeeper server address
-	servers := []string{"127.0.0.1:2181"}
-	// service A will watch service B
-	serviceA := &client.ServiceNode{"serviceA", "127.0.0.1:18001"}
-	clientA, err := client.NewClient(servers, "/test", serviceA, []string{"serviceB"}, &AWatcher{name: serviceA.Name, wg: &wg}, 1)
-	if err != nil {
-		panic(err)
-	}
 	wg.Add(1)
+	// zookeeper server address
+	clientA, := client.NewClient([]string{"127.0.0.1:18001"}, 10)
 	defer clientA.Close()
+	clientA.Register("/test", "child1", []byte("this is a test"))
 
 	// ensure service B register after service A
 	time.Sleep(time.Second * time.Duration(3))
-	serviceB := &client.ServiceNode{"serviceB", "127.0.0.1:18002"}
-	clientB, err := client.NewClient(servers, "/test", serviceB, []string{"serviceA"}, nil, 1)
-	if err != nil {
-		panic(err)
-	}
+	clientB := client.NewClient([]string{"127.0.0.1:18001"}, 10)
 	defer clientB.Close()
-
+	clientB.Watch("/", "test", p)
+	time.Sleep(time.Second * time.Duration(2))
+	clientA.Unregister()
+	time.Sleep(time.Second * time.Duration(20))
+	wg.Done()
 	wg.Wait()
 }
