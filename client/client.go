@@ -253,9 +253,9 @@ func (c *client) ensurePath(path string) error {
 		return nil
 	}
 	nodes := strings.Split(path, "/")
-	root := "/"
+	root := ""
 	for _, v := range nodes[1:] {
-		root += v
+		root += "/" + v
 		if exists, _, err := c.conn.Exists(root); err != nil {
 			return err
 		} else if exists {
