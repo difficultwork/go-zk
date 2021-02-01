@@ -14,13 +14,20 @@ type WatchProcessor interface {
 }
 
 type Client interface {
-	Register(root, nodeName string, data []byte)
-	Unregister()
+	Register(root, nodeName string, data []byte) error
+	Unregister(root, nodeName string)
 	Watch(root, nodeName string, processor WatchProcessor)
 	Unwatch(root, nodeName string)
 	Get(path string) ([]byte, error)
 	GetChildren(path string) ([]string, error)
 	Close()
+}
+
+type registerInfo struct {
+	root string
+	path string
+	name string
+	data []byte
 }
 
 type watcherInfo struct {
@@ -36,34 +43,37 @@ type watcherInfo struct {
 
 // client information
 type client struct {
-	zkAddrs      []string        // zk server addresses
-	zkRoot       string          // service root path on zk
-	conn         *zk.Conn        // zk client connection
-	watchers     sync.Map        // names of services that should be watched
-	eventChan    <-chan zk.Event // connection event channel
-	timeout      time.Duration   //
-	unregister   chan bool       // register client
-	registerPath string          //
+	zkAddrs   []string        // zk server addresses
+	zkRoot    string          // service root path on zk
+	conn      *zk.Conn        // zk client connection
+	registers sync.Map        // names of nodes that register
+	watchers  sync.Map        // names of nodes that should be watched
+	eventChan <-chan zk.Event // connection event channel
+	timeout   time.Duration   //
+	close     chan bool       // close
 }
 
 // Create new zk client
 func NewClient(zkAddr []string, timeout int) (Client, error) {
 	c := &client{
 		zkAddrs: zkAddr,
-		timeout: time.Duration(timeout) * time.Second}
+		timeout: time.Duration(timeout) * time.Second,
+		close:   make(chan bool)}
 
 	var err error
 	if c.conn, c.eventChan, err = zk.Connect(c.zkAddrs, time.Duration(timeout)*time.Second); err != nil {
 		return nil, err
 	}
+
+	c.run()
 	return c, nil
 }
 
 // Close zk connection and remove ephemeral znode
 func (c *client) Close() {
 	c.conn.Close()
-	if c.unregister != nil {
-		close(c.unregister)
+	if c.close != nil {
+		close(c.close)
 	}
 	// unblock all watch routine
 	c.watchers.Range(func(k, v interface{}) bool {
@@ -76,27 +86,12 @@ func (c *client) Close() {
 	})
 }
 
-// Register node to zookeeper
-func (c *client) Register(root, nodeName string, data []byte) {
-	if c.unregister != nil {
-		return
-	}
-	c.registerPath = getPath(root, nodeName)
-	c.unregister = make(chan bool)
+func (c *client) run() {
 	go func() {
-		defer func() {
-			c.unregister = nil
-		}()
 		for {
-			var event zk.Event
-			var ok bool
-			select {
-			case event, ok = <-c.eventChan:
-				if !ok {
-					return
-				}
-			case <-c.unregister:
-				return
+			event, ok := <-c.eventChan
+			if !ok {
+				panic("client: event channel error")
 			}
 
 			if event.Type != zk.EventSession || event.State != zk.StateConnected {
@@ -111,28 +106,57 @@ func (c *client) Register(root, nodeName string, data []byte) {
 				return true
 			})
 
-			err := c.ensurePath(root)
-			if err != nil && c.conn.State() == zk.StateConnected {
-				panic("client: unexcept error in ensure path")
-			}
-			_, err = c.conn.Create(c.registerPath, data, zk.FlagEphemeral, zk.WorldACL(zk.PermAll))
-			if err != nil && err != zk.ErrNodeExists && c.conn.State() == zk.StateConnected {
-				panic("client: unexcept error in create protected ephemeral sequential")
-			}
+			c.registers.Range(func(k, v interface{}) bool {
+				r, ok := v.(*registerInfo)
+				if ok {
+					err := c.ensurePath(r.root)
+					if err != nil && c.conn.State() == zk.StateConnected {
+						panic("client: unexcept error in ensure path")
+					}
+					_, err = c.conn.Create(r.path, r.data, zk.FlagEphemeral, zk.WorldACL(zk.PermAll))
+					if err != nil && err != zk.ErrNodeExists && c.conn.State() == zk.StateConnected {
+						panic("client: unexcept error in create protected ephemeral sequential")
+					}
+				}
+				return true
+			})
+
 		}
 	}()
 }
 
-func (c *client) Unregister() {
-	if c.unregister == nil {
+// Register node to zookeeper
+func (c *client) Register(root, nodeName string, data []byte) error {
+	r := &registerInfo{
+		root: root,
+		path: getPath(root, nodeName),
+		name: nodeName,
+		data: data}
+	if _, ok := c.registers.LoadOrStore(r.path, r); ok {
+		return nil
+	}
+	err := c.ensurePath(r.root)
+	if err != nil && c.conn.State() == zk.StateConnected {
+		return err
+	}
+	_, err = c.conn.Create(r.path, r.data, zk.FlagEphemeral, zk.WorldACL(zk.PermAll))
+	if err != nil && err != zk.ErrNodeExists && c.conn.State() == zk.StateConnected {
+		return err
+	}
+	return nil
+}
+
+func (c *client) Unregister(root, nodeName string) {
+	path := getPath(root, nodeName)
+	if _, ok := c.registers.Load(path); !ok {
 		return
 	}
-	close(c.unregister)
-	_, sate, err := c.conn.Get(c.registerPath)
+	c.registers.Delete(path)
+	_, sate, err := c.conn.Get(path)
 	if err != nil {
 		return
 	}
-	c.conn.Delete(c.registerPath, sate.Version)
+	c.conn.Delete(path, sate.Version)
 }
 
 func (c *client) Get(path string) ([]byte, error) {
@@ -214,6 +238,7 @@ func (c *client) Unwatch(root, nodeName string) {
 	if !ok {
 		return
 	}
+	c.watchers.Delete(path)
 	w, ok := v.(*watcherInfo)
 	if ok {
 		close(w.close)
